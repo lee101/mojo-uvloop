@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mojo-uvloop"
+version = "0.1.0"
+description = "Mojo batch primitives with a uvloop-compatible event loop API"
+requires-python = ">=3.12"
+dependencies = ["numpy"]
+license = {text = "MIT"}
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]

@@ -1,6 +1,6 @@
 """C ABI for the event-loop primitive kernels."""
 
-from std.algorithm import parallelize
+from std.collections import Array
 from std.math import round
 from std.sys.info import simd_width_of as simdwidthof
 
@@ -10,6 +10,17 @@ comptime UPtr = UnsafePointer[UInt64, AnyOrigin[mut=True]]
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime COMPACT_PARALLEL_THRESHOLD = 1_000_000
 comptime COMPACT_TASKS = 8
+
+
+@export("KGEN_CompilerRT_AsyncRT_GetOrCreateCPUDevice")
+def muv_parallel_runtime_compat() abi("C") -> Int:
+    """Keep the pre-1.1 Python runtime bootstrap ABI available.
+
+    Parallel algorithms moved out of the Mojo standard library in 1.1, so the
+    compaction kernel no longer needs an async runtime.  Existing Python
+    bindings still probe this symbol and only require a non-null result.
+    """
+    return 1
 
 
 @export("muv_quantize_delays")
@@ -80,7 +91,7 @@ def radix_order(
 ):
     var words = deadlines.bitcast[UInt64]()
     comptime RADIX_SIZE = 256
-    var counts = InlineArray[Int, RADIX_SIZE](fill=0)
+    var counts = Array[Int, RADIX_SIZE](fill=0)
     for i in range(n):
         indices[i] = Int64(i)
     var source = indices
@@ -179,13 +190,10 @@ def muv_compact_ready(
     var counts = IPtr(unsafe_from_address=counts_addr)
     var chunk = (n + COMPACT_TASKS - 1) // COMPACT_TASKS
 
-    @parameter
-    def count_task(task: Int):
+    for task in range(COMPACT_TASKS):
         var start = task * chunk
         var end = min(start + chunk, n)
         counts[task] = Int64(count_live(cancelled, start, end))
-
-    parallelize[count_task](COMPACT_TASKS)
 
     var total = 0
     for task in range(COMPACT_TASKS):
@@ -193,13 +201,10 @@ def muv_compact_ready(
         counts[task] = Int64(total)
         total += size
 
-    @parameter
-    def emit_task(task: Int):
+    for task in range(COMPACT_TASKS):
         var start = task * chunk
         var end = min(start + chunk, n)
         _ = emit_live(cancelled, indices, start, end, Int(counts[task]))
-
-    parallelize[emit_task](COMPACT_TASKS)
     return total
 
 

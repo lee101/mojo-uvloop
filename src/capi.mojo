@@ -1,26 +1,13 @@
 """C ABI for the event-loop primitive kernels."""
 
 from std.collections import Array
-from std.math import round
+from std.math import iota, round
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime UPtr = UnsafePointer[UInt64, AnyOrigin[mut=True]]
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
-comptime COMPACT_PARALLEL_THRESHOLD = 1_000_000
-comptime COMPACT_TASKS = 8
-
-
-@export("KGEN_CompilerRT_AsyncRT_GetOrCreateCPUDevice")
-def muv_parallel_runtime_compat() abi("C") -> Int:
-    """Keep the pre-1.1 Python runtime bootstrap ABI available.
-
-    Parallel algorithms moved out of the Mojo standard library in 1.1, so the
-    compaction kernel no longer needs an async runtime.  Existing Python
-    bindings still probe this symbol and only require a non-null result.
-    """
-    return 1
 
 
 @export("muv_quantize_delays")
@@ -47,11 +34,38 @@ def timer_key(bits: UInt64) -> UInt64:
     return bits ^ SIGN
 
 
-def merge_order(
-    deadlines: FPtr, n: Int, indices: IPtr, work: IPtr
-):
-    for i in range(n):
+def order_key[float_keys: Bool](bits: UInt64) -> UInt64:
+    comptime if float_keys:
+        return timer_key(bits)
+    return bits
+
+
+def initialize_indices(indices: IPtr, n: Int):
+    comptime W = simdwidthof[DType.float64]()
+    var i = 0
+    while i + W <= n:
+        indices.store(i, iota[DType.int64, W](Int64(i)))
+        i += W
+    while i < n:
         indices[i] = Int64(i)
+        i += 1
+
+
+def copy_indices(source: IPtr, destination: IPtr, n: Int):
+    comptime W = simdwidthof[DType.float64]()
+    var i = 0
+    while i + W <= n:
+        destination.store(i, source.load[width=W](i))
+        i += W
+    while i < n:
+        destination[i] = source[i]
+        i += 1
+
+
+def merge_order[float_keys: Bool](
+    words: UPtr, n: Int, indices: IPtr, work: IPtr
+):
+    initialize_indices(indices, n)
 
     var width = 1
     while width < n:
@@ -65,7 +79,9 @@ def merge_order(
             while left < middle and right < end:
                 var li = Int(indices[left])
                 var ri = Int(indices[right])
-                if deadlines[li] <= deadlines[ri]:
+                if order_key[float_keys](words[li]) <= order_key[float_keys](
+                    words[ri]
+                ):
                     work[dst] = indices[left]
                     left += 1
                 else:
@@ -86,24 +102,26 @@ def merge_order(
         width *= 2
 
 
-def radix_order(
-    deadlines: FPtr, n: Int, indices: IPtr, work: IPtr
+def radix_order[float_keys: Bool](
+    words: UPtr, n: Int, indices: IPtr, work: IPtr
 ):
-    var words = deadlines.bitcast[UInt64]()
-    comptime RADIX_SIZE = 256
+    comptime RADIX_BITS = 16
+    comptime RADIX_SIZE = 1 << RADIX_BITS
+    comptime RADIX_MASK = UInt64(RADIX_SIZE - 1)
+    comptime RADIX_PASSES = (64 + RADIX_BITS - 1) // RADIX_BITS
     var counts = Array[Int, RADIX_SIZE](fill=0)
-    for i in range(n):
-        indices[i] = Int64(i)
+    initialize_indices(indices, n)
     var source = indices
     var destination = work
-    for radix_pass in range(8):
+    for radix_pass in range(RADIX_PASSES):
         for bucket in range(RADIX_SIZE):
             counts[bucket] = 0
-        var shift = radix_pass * 8
+        var shift = radix_pass * RADIX_BITS
         for i in range(n):
             var index = Int(source[i])
             var bucket = Int(
-                (timer_key(words[index]) >> UInt64(shift)) & UInt64(255)
+                (order_key[float_keys](words[index]) >> UInt64(shift))
+                & RADIX_MASK
             )
             counts[bucket] += 1
         var offset = 0
@@ -114,13 +132,16 @@ def radix_order(
         for i in range(n):
             var index = Int(source[i])
             var bucket = Int(
-                (timer_key(words[index]) >> UInt64(shift)) & UInt64(255)
+                (order_key[float_keys](words[index]) >> UInt64(shift))
+                & RADIX_MASK
             )
             destination[counts[bucket]] = source[i]
             counts[bucket] += 1
         var temporary = source
         source = destination
         destination = temporary
+    comptime if RADIX_PASSES % 2 != 0:
+        copy_indices(source, indices, n)
 
 
 @export("muv_order_timers")
@@ -128,29 +149,26 @@ def muv_order_timers(
     deadlines_addr: Int, n: Int, indices_addr: Int, work_addr: Int
 ) abi("C"):
     var deadlines = FPtr(unsafe_from_address=deadlines_addr)
+    var words = deadlines.bitcast[UInt64]()
     var indices = IPtr(unsafe_from_address=indices_addr)
     var work = IPtr(unsafe_from_address=work_addr)
     if n < 2048:
-        merge_order(deadlines, n, indices, work)
+        merge_order[True](words, n, indices, work)
     else:
-        radix_order(deadlines, n, indices, work)
+        radix_order[True](words, n, indices, work)
 
 
-def count_live(cancelled: BPtr, start: Int, end: Int) -> Int:
-    comptime W = simdwidthof[DType.float64]()
-    var count = 0
-    var vector_count = SIMD[DType.int64, W](0)
-    var i = start
-    while i + W <= end:
-        vector_count += (
-            cancelled.load[width=W](i).eq(0).cast[DType.int64]()
-        )
-        i += W
-    count = Int(vector_count.reduce_add())
-    while i < end:
-        count += Int(cancelled[i] == 0)
-        i += 1
-    return count
+@export("muv_order_uint64")
+def muv_order_uint64(
+    values_addr: Int, n: Int, indices_addr: Int, work_addr: Int
+) abi("C"):
+    var values = UPtr(unsafe_from_address=values_addr)
+    var indices = IPtr(unsafe_from_address=indices_addr)
+    var work = IPtr(unsafe_from_address=work_addr)
+    if n < 2048:
+        merge_order[False](values, n, indices, work)
+    else:
+        radix_order[False](values, n, indices, work)
 
 
 def emit_live(
@@ -180,32 +198,11 @@ def emit_live(
 
 @export("muv_compact_ready")
 def muv_compact_ready(
-    cancelled_addr: Int, n: Int, indices_addr: Int, counts_addr: Int
+    cancelled_addr: Int, n: Int, indices_addr: Int, _counts_addr: Int
 ) abi("C") -> Int:
     var cancelled = BPtr(unsafe_from_address=cancelled_addr)
     var indices = IPtr(unsafe_from_address=indices_addr)
-    if n < COMPACT_PARALLEL_THRESHOLD:
-        return emit_live(cancelled, indices, 0, n, 0)
-
-    var counts = IPtr(unsafe_from_address=counts_addr)
-    var chunk = (n + COMPACT_TASKS - 1) // COMPACT_TASKS
-
-    for task in range(COMPACT_TASKS):
-        var start = task * chunk
-        var end = min(start + chunk, n)
-        counts[task] = Int64(count_live(cancelled, start, end))
-
-    var total = 0
-    for task in range(COMPACT_TASKS):
-        var size = Int(counts[task])
-        counts[task] = Int64(total)
-        total += size
-
-    for task in range(COMPACT_TASKS):
-        var start = task * chunk
-        var end = min(start + chunk, n)
-        _ = emit_live(cancelled, indices, start, end, Int(counts[task]))
-    return total
+    return emit_live(cancelled, indices, 0, n, 0)
 
 
 @export("muv_due_indices")

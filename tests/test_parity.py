@@ -203,6 +203,22 @@ def test_bulk_call_soon_and_later_execute_all_callbacks():
         loop.close()
 
 
+def test_bulk_call_later_preserves_equal_deadline_order():
+    loop = muv.new_event_loop()
+    events = []
+    try:
+        loop.call_later_many(
+            [0.0015, -1.0, 0.0015, 0.0004],
+            [events.append] * 4,
+            args=[("later-a",), ("soon-a",), ("later-b",), ("soon-b",)],
+        )
+        loop.call_later(0.006, loop.stop)
+        loop.run_forever()
+        assert events == ["soon-a", "soon-b", "later-a", "later-b"]
+    finally:
+        loop.close()
+
+
 def test_call_at_many_and_argument_validation():
     loop = muv.new_event_loop()
     events = []

@@ -7,7 +7,7 @@ import contextvars
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from .primitives import MAX_SLEEP, order_timers, quantize_delays
+from .primitives import MAX_SLEEP, _order_uint64, quantize_delays
 
 
 def _quantize_delay(delay: float) -> float:
@@ -83,7 +83,7 @@ class Loop(asyncio.SelectorEventLoop):
         if delay_ms.size != len(callback_list):
             raise ValueError("delays and callbacks must have equal length")
         arg_list = _normalize_args(callback_list, args)
-        order = order_timers(delay_ms.astype("float64", copy=False))
+        order = _order_uint64(delay_ms)
         handles: list[asyncio.Handle | None] = [None] * len(callback_list)
         base = self.time()
         for raw_index in order:

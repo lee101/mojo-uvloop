@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import mojo_uvloop as muv
+from mojo_uvloop.primitives import _order_uint64
 
 
 def test_quantize_delays_matches_uvloop_formula():
@@ -55,6 +56,21 @@ def test_order_timers_radix_path_is_stable_for_signed_values_and_zero():
     assert np.array_equal(got, expected)
 
 
+@pytest.mark.parametrize("size", [2047, 2048, 2051])
+def test_order_timers_threshold_and_simd_tail(size):
+    deadlines = (np.arange(size, dtype=np.float64) * 37) % 101
+    got = muv.order_timers(deadlines)
+    expected = np.argsort(deadlines, kind="stable")
+    assert np.array_equal(got, expected)
+
+
+def test_uint64_ordering_radix_path_is_stable_with_simd_tail():
+    values = (np.arange(2051, dtype=np.uint64) * 37) % 101
+    got = _order_uint64(values)
+    expected = np.argsort(values, kind="stable")
+    assert np.array_equal(got, expected)
+
+
 def test_compact_ready_matches_fifo_reference():
     rng = np.random.default_rng(1)
     cancelled = rng.random(100_007) < 0.35
@@ -62,7 +78,7 @@ def test_compact_ready_matches_fifo_reference():
 
 
 @pytest.mark.parametrize("size", [999_999, 1_000_000, 1_000_007])
-def test_compact_ready_parallel_threshold_and_simd_tail(size):
+def test_compact_ready_large_inputs_and_simd_tail(size):
     cancelled = np.zeros(size, dtype=np.bool_)
     cancelled[::7] = True
     cancelled[-1] = False

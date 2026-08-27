@@ -16,13 +16,13 @@ F = ctypes.c_double
 _SIGNATURES = {
     "muv_quantize_delays": ([I, I, I, F], None),
     "muv_order_timers": ([I, I, I, I], None),
+    "muv_order_uint64": ([I, I, I, I], None),
     "muv_compact_ready": ([I, I, I, I], I),
     "muv_due_indices": ([I, I, I, F, I, I, I], None),
     "muv_coalesce_events": ([I, I, I, I, I, I, I, I], I),
 }
 
 _library: ctypes.CDLL | None = None
-_parallel_runtime = None
 
 
 def lib() -> ctypes.CDLL:
@@ -36,17 +36,6 @@ def lib() -> ctypes.CDLL:
             function.argtypes = argtypes
             function.restype = restype
     return _library
-
-
-def ensure_parallel_runtime() -> None:
-    global _parallel_runtime
-    if _parallel_runtime is None:
-        runtime = lib().KGEN_CompilerRT_AsyncRT_GetOrCreateCPUDevice
-        runtime.argtypes = []
-        runtime.restype = ctypes.c_void_p
-        if runtime() is None:
-            raise RuntimeError("failed to initialize the Mojo parallel runtime")
-        _parallel_runtime = runtime
 
 
 def addr(array: np.ndarray) -> int:

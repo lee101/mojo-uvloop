@@ -99,23 +99,25 @@ mojo-uvloop was faster.
 
 | benchmark | mojo-uvloop | reference | ratio | reference |
 | --- | ---: | ---: | ---: | --- |
-| quantize 5M delays | 50.06 ms | 177.38 ms | 3.54x | NumPy uvloop formula |
-| order 1M timers | 288.20 ms | 162.34 ms | 0.56x | NumPy stable argsort |
-| compact 5M ready | 11.97 ms | 24.17 ms | 2.02x | NumPy flatnonzero |
-| coalesce 1M poll events | 120.70 ms | 461.75 ms | 3.83x | Python ordered dict |
-| schedule + dispatch 200k callbacks | 690.76 ms | 380.01 ms | 0.55x | upstream uvloop |
-| schedule 100k timers | 456.48 ms | 527.13 ms | 1.15x | upstream scalar API |
+| quantize 5M delays | 40.98 ms | 377.96 ms | 9.22x | NumPy uvloop formula |
+| order 1M timers | 78.66 ms | 143.06 ms | 1.82x | NumPy stable argsort |
+| compact 5M ready | 34.56 ms | 15.41 ms | 0.45x | NumPy flatnonzero |
+| coalesce 1M poll events | 54.95 ms | 497.57 ms | 9.06x | Python ordered dict |
+| schedule + dispatch 200k callbacks | 432.06 ms | 266.04 ms | 0.62x | upstream uvloop |
+| schedule 100k timers | 248.16 ms | 316.81 ms | 1.28x | upstream scalar API |
 
 Batch delay quantization and poll-event coalescing remain the largest wins.
-Ready compaction beats its NumPy reference, while stable timer ordering does
-not on this run. The complete bulk timer path beats upstream's scalar API.
-Scheduling and dispatching callbacks remains slower than upstream uvloop; it
-is Python object execution rather than a batchable Mojo kernel.
-That result is included to keep the performance boundary explicit.
+The four-pass stable timer radix sort now beats NumPy's stable argsort. Ready
+compaction lost to NumPy on this run, while the complete bulk timer path beat
+upstream's scalar API. Scheduling and dispatching callbacks remains slower
+than upstream uvloop; it is Python object execution rather than a batchable
+Mojo kernel. Those results are included to keep the performance boundary
+explicit.
 
-No GPU path is provided. These kernels are sorting, compaction, hashing, and
-Python object scheduling workloads; a device path is outside this port's
-tested scope.
+No GPU path is provided. Sorting, compaction, hashing, and Python object
+scheduling perform roughly zero to one simple operation per 8--16 bytes moved,
+well below the two-flops-per-byte threshold where transfer and launch costs
+could be justified.
 
 ## How it works
 
@@ -126,10 +128,12 @@ addresses and are reconstructed as `UnsafePointer[..., AnyOrigin[mut=True]]`
 inside Mojo. The kernels allocate no memory and retain no pointers after a
 call.
 
-Timer ordering uses a stable radix sort for large batches and a bottom-up merge
-sort for small batches, so equal deadlines retain registration order. Ready
-compaction uses SIMD counting and emission, with thresholded parallel chunks
-for million-element queues. Due extraction advances a cursor while filtering
+Timer ordering uses a four-pass stable 16-bit radix sort for large batches and
+a bottom-up merge sort for small batches, so equal deadlines retain
+registration order. Index initialization and copy-back use native-width SIMD
+with scalar tails. Quantized `uint64` timer buffers are ordered in place across
+the FFI boundary without a temporary `float64` copy. Ready compaction uses a
+single-pass SIMD emitter. Due extraction advances a cursor while filtering
 cancelled entries. Poll coalescing uses caller-owned open-addressed hash arrays
 and preserves the first occurrence of each file descriptor while OR-ing
 readiness masks.

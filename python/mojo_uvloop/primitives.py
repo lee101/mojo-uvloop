@@ -8,11 +8,9 @@ from typing import Generic, TypeVar
 
 import numpy as np
 
-from ._lib import addr, ensure_parallel_runtime, lib
+from ._lib import addr, lib
 
 MAX_SLEEP = 3600 * 24 * 365 * 100
-_COMPACT_PARALLEL_THRESHOLD = 1_000_000
-_COMPACT_TASKS = 8
 T = TypeVar("T")
 
 
@@ -84,20 +82,23 @@ def order_timers(deadlines: Iterable[float]) -> np.ndarray:
     return indices
 
 
+def _order_uint64(values: np.ndarray) -> np.ndarray:
+    if values.dtype != np.uint64 or values.ndim != 1 or not values.flags.c_contiguous:
+        raise ValueError("values must be a contiguous one-dimensional uint64 array")
+    indices = np.empty(values.size, dtype=np.int64)
+    work = np.empty(values.size, dtype=np.int64)
+    if values.size:
+        lib().muv_order_uint64(addr(values), values.size, addr(indices), addr(work))
+    return indices
+
+
 def compact_ready(cancelled: Iterable[bool]) -> np.ndarray:
     """Return live ready-queue positions in FIFO order."""
     flags = _flags(cancelled)
     indices = np.empty(flags.size, dtype=np.int64)
     count = 0
     if flags.size:
-        counts_addr = 0
-        if flags.size >= _COMPACT_PARALLEL_THRESHOLD:
-            ensure_parallel_runtime()
-            counts = np.empty(_COMPACT_TASKS, dtype=np.int64)
-            counts_addr = addr(counts)
-        count = lib().muv_compact_ready(
-            addr(flags), flags.size, addr(indices), counts_addr
-        )
+        count = lib().muv_compact_ready(addr(flags), flags.size, addr(indices), 0)
         if count < 0 or count > flags.size:
             raise RuntimeError("Mojo returned an invalid compacted length")
     return indices[:count]

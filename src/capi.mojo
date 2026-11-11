@@ -55,7 +55,7 @@ def copy_indices(source: IPtr, destination: IPtr, n: Int):
     comptime W = simdwidthof[DType.float64]()
     var i = 0
     while i + W <= n:
-        destination.store(i, source.load[width=W](i))
+        destination.store(i, source.unsafe_load[width=W](i))
         i += W
     while i < n:
         destination[i] = source[i]
@@ -182,7 +182,7 @@ def emit_live(
     var count = destination
     var i = start
     while i + W <= end:
-        var live = cancelled.load[width=W](i).eq(0)
+        var live = cancelled.unsafe_load[width=W](i).eq(0)
         comptime for lane in range(W):
             if live[lane]:
                 indices[count] = Int64(i + lane)
